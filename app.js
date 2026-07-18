@@ -4,14 +4,69 @@ const STORAGE_KEY = 'roozmarre_yaar_v1';
 const $ = (s, root=document) => root.querySelector(s);
 const $$ = (s, root=document) => [...root.querySelectorAll(s)];
 const uid = () => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random().toString(16).slice(2)}`;
-const todayISO = () => new Date().toISOString().slice(0,10);
+const localISODate = (value=new Date()) => {
+  const d = value instanceof Date ? value : new Date(value);
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  const day = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+};
+const dateFromISO = iso => {
+  if(!iso) return null;
+  if(iso instanceof Date) return new Date(iso);
+  if(String(iso).includes('T')) return new Date(iso);
+  const [y,m,d] = String(iso).split('-').map(Number);
+  return new Date(y,(m||1)-1,d||1,12,0,0,0);
+};
+const todayISO = () => localISODate(new Date());
 const nowISO = () => new Date().toISOString();
 const faDate = (d=new Date(), opts={}) => new Intl.DateTimeFormat('fa-IR-u-ca-persian',{weekday:'long',year:'numeric',month:'long',day:'numeric',...opts}).format(d);
 const faNum = n => new Intl.NumberFormat('fa-IR').format(Number(n||0));
 const money = n => `${faNum(n)} تومان`;
-const daysBetween = (a,b) => Math.floor((new Date(b)-new Date(a))/(86400000));
+const daysBetween = (a,b) => Math.floor((dateFromISO(b)-dateFromISO(a))/(86400000));
 const startOfWeek = (date=new Date()) => { const d=new Date(date); const day=(d.getDay()+1)%7; d.setHours(0,0,0,0); d.setDate(d.getDate()-day); return d; };
 const escapeHtml = s => String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#039;','"':'&quot;'}[c]));
+
+const PERSIAN_MONTHS = ['فروردین','اردیبهشت','خرداد','تیر','مرداد','شهریور','مهر','آبان','آذر','دی','بهمن','اسفند'];
+const PERSIAN_WEEKDAYS = ['ش','ی','د','س','چ','پ','ج'];
+const jalaliFormatter = new Intl.DateTimeFormat('en-US-u-ca-persian-nu-latn',{year:'numeric',month:'numeric',day:'numeric'});
+const toPersianDigits = value => String(value).replace(/\d/g,d=>'۰۱۲۳۴۵۶۷۸۹'[Number(d)]);
+const normalizeDigits = value => String(value||'')
+  .replace(/[۰-۹]/g,d=>String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)))
+  .replace(/[٠-٩]/g,d=>String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+function isoToJalali(iso){
+  const date=dateFromISO(iso);
+  if(!date || Number.isNaN(date.getTime())) return null;
+  const parts=Object.fromEntries(jalaliFormatter.formatToParts(date).filter(p=>['year','month','day'].includes(p.type)).map(p=>[p.type,Number(p.value)]));
+  return {jy:parts.year,jm:parts.month,jd:parts.day};
+}
+function jalaliToISO(jy,jm,jd){
+  jy=Number(jy);jm=Number(jm);jd=Number(jd);
+  if(!jy||jm<1||jm>12||jd<1||jd>31) return null;
+  const start=new Date(jy+621,2,1,12);
+  const end=new Date(jy+622,3,1,12);
+  for(let d=new Date(start); d<end; d.setDate(d.getDate()+1)){
+    const j=isoToJalali(d);
+    if(j && j.jy===jy && j.jm===jm && j.jd===jd) return localISODate(d);
+  }
+  return null;
+}
+function formatJalaliISO(iso){
+  const j=isoToJalali(iso);
+  return j ? toPersianDigits(`${j.jy}/${String(j.jm).padStart(2,'0')}/${String(j.jd).padStart(2,'0')}`) : '';
+}
+function parseJalaliText(text){
+  const value=normalizeDigits(text).trim().replace(/[-.]/g,'/');
+  const m=value.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+  if(!m) return null;
+  const iso=jalaliToISO(Number(m[1]),Number(m[2]),Number(m[3]));
+  return iso ? {iso,jy:Number(m[1]),jm:Number(m[2]),jd:Number(m[3])} : null;
+}
+function jalaliMonthLength(jy,jm){
+  if(jm<=6) return 31;
+  if(jm<=11) return 30;
+  return jalaliToISO(jy,12,30) ? 30 : 29;
+}
 
 const initialState = () => ({
   profile:{name:'امیر', timezone:'Asia/Baku', theme:'light'},
@@ -76,7 +131,7 @@ function dueHygiene(t){
   if(!t.lastDone) return true;
   return daysBetween(t.lastDone,todayISO())>=Number(t.interval||1);
 }
-function weekLogs(r){ const start=startOfWeek(); return (r.logs||[]).filter(l=>new Date(l.date)>=start); }
+function weekLogs(r){ const start=startOfWeek(); return (r.logs||[]).filter(l=>dateFromISO(l.date)>=start); }
 function dueRoutine(r){
   if(!r.active) return false;
   if(r.kind==='daily') return !isDoneToday(r.logs);
@@ -84,10 +139,10 @@ function dueRoutine(r){
 }
 function cycleDays(c){ return c==='daily'?1:c==='weekly'?7:c==='monthly'?30:Number(c)||1; }
 function dueInventory(i){ return !i.lastChecked || daysBetween(i.lastChecked,todayISO())>=cycleDays(i.cycle); }
-function dueBills(){ const today=new Date(todayISO()); return state.bills.filter(b=>b.status!=='paid' && new Date(b.dueDate)>=new Date(today.getTime()-86400000) && new Date(b.dueDate)<=new Date(today.getTime()+7*86400000)); }
+function dueBills(){ const today=dateFromISO(todayISO()); return state.bills.filter(b=>b.status!=='paid' && b.dueDate && dateFromISO(b.dueDate)>=new Date(today.getTime()-86400000) && dateFromISO(b.dueDate)<=new Date(today.getTime()+7*86400000)); }
 function currentInstallmentDue(p){
   if(p.status==='settled' || p.paidCount>=p.count) return false;
-  const next=new Date(p.nextDueDate||todayISO());
+  const next=dateFromISO(p.nextDueDate||todayISO());
   const limit=new Date(); limit.setDate(limit.getDate()+7);
   return next<=limit;
 }
@@ -102,7 +157,7 @@ function dashboardTasks(){
 }
 function cycleLabel(c){ return c==='daily'?'روزانه':c==='weekly'?'هفتگی':c==='monthly'?'ماهانه':`هر ${c} روز`; }
 function statusLabel(s){ return s==='ok'?'موجود':s==='low'?'رو به اتمام':'تمام‌شده'; }
-function toFaShort(date){ if(!date) return '—'; return new Intl.DateTimeFormat('fa-IR-u-ca-persian',{month:'short',day:'numeric'}).format(new Date(date)); }
+function toFaShort(date){ if(!date) return '—'; return new Intl.DateTimeFormat('fa-IR-u-ca-persian',{month:'short',day:'numeric'}).format(dateFromISO(date)); }
 function formatDateTime(date){ return new Intl.DateTimeFormat('fa-IR-u-ca-persian',{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}).format(new Date(date)); }
 
 function navigate(route){
@@ -226,6 +281,7 @@ function renderSettings(){
     <div class="grid layout-2"><div class="card"><h2 class="section-title">پروفایل</h2><div class="form-grid"><div class="field"><label>نام</label><input id="profileName" value="${escapeHtml(state.profile.name)}"></div><div class="field"><label>منطقه زمانی</label><select id="profileTimezone"><option value="Asia/Baku" ${state.profile.timezone==='Asia/Baku'?'selected':''}>باکو</option><option value="Asia/Tehran" ${state.profile.timezone==='Asia/Tehran'?'selected':''}>تهران</option></select></div></div><button class="btn primary" data-save-profile style="margin-top:14px">ذخیره تنظیمات</button></div>
     <div class="card"><h2 class="section-title">نصب روی گوشی</h2><p class="item-sub">برای نصب استاندارد، اپ باید از یک آدرس HTTPS باز شده باشد.</p><button class="btn primary" data-install-app>${isStandalone()?'اپ نصب شده است':'نصب روزمره‌یار'}</button><div class="divider"></div><div class="notice">اگر دکمه نصب فعال نشد، صفحه را مستقیماً در Chrome یا Safari باز کن؛ نه داخل مرورگر داخلی پیام‌رسان.</div></div>
     <div class="card"><h2 class="section-title">اعلان مرورگر</h2><p class="item-sub">در نسخه فعلی، اعلان‌ها وقتی وب‌اپ باز است یا مرورگر اجازه اجرای آن را می‌دهد بررسی می‌شوند.</p><button class="btn ${state.reminders.enabled?'secondary':'primary'}" data-enable-notifications>${state.reminders.enabled?'اعلان فعال است':'فعال‌کردن اعلان'}</button><div class="divider"></div><div class="notice">برای اعلان کاملاً پس‌زمینه، بعداً وب‌اپ را به Supabase یا سرویس Push متصل می‌کنیم.</div></div>
+    <div class="card"><h2 class="section-title">تقویم</h2><div class="item"><div><div class="item-title">تقویم شمسی فعال است</div><div class="item-sub">تمام تاریخ‌های نمایشی و انتخاب تاریخ در فرم‌ها به‌صورت شمسی است.</div></div><span class="badge green">شمسی</span></div><p class="item-sub" style="margin-top:12px">برای پایداری محاسبات، تاریخ‌ها در حافظه به‌صورت استاندارد ذخیره می‌شوند اما همیشه شمسی نمایش داده می‌شوند.</p></div>
     <div class="card"><h2 class="section-title">پشتیبان‌گیری</h2><div class="toolbar"><button class="btn primary" data-export>دانلود بکاپ</button><button class="btn ghost" data-import>بازیابی بکاپ</button></div><p class="item-sub">همه اطلاعات در مرورگر همین دستگاه ذخیره می‌شوند. بکاپ JSON را در جای امن نگه دار.</p></div>
     <div class="card"><h2 class="section-title">پاک‌سازی</h2><button class="btn danger" data-reset>بازنشانی کامل برنامه</button></div></div>`;
 }
@@ -294,7 +350,7 @@ function buyItem(id){
 function markBillPaid(id){ mutate(()=>{const b=state.bills.find(x=>x.id===id);b.status='paid';b.paidAt=nowISO();state.expenses.push({id:uid(),title:b.title,amount:b.amount,date:todayISO(),category:'قبوض'});},'قبض پرداخت‌شده ثبت شد.'); }
 function shareBill(id){ const b=state.bills.find(x=>x.id===id); const text=`سلام، ${b.title} به مبلغ ${money(b.amount)} صادر شده است. مهلت پرداخت ${toFaShort(b.dueDate)} است. لطفاً پس از پرداخت اطلاع دهید.`; navigator.clipboard?.writeText(text); toast('متن قبض کپی شد.'); }
 function unitPayment(id){ promptAmount('مبلغ پرداختی واحد',0,amount=>mutate(()=>{const u=state.building.units.find(x=>x.id===id);u.balance=Math.max(0,Number(u.balance)-amount);},'پرداخت واحد ثبت شد.')); }
-function payInstallment(id){ const p=state.installments.find(x=>x.id===id); if(!p||p.status==='settled')return; promptAmount(`پرداخت قسط ${p.title}`,p.installmentAmount,amount=>mutate(()=>{p.payments=p.payments||[];p.payments.push({id:uid(),amount,date:todayISO()});p.paidCount=Math.min(p.count,Number(p.paidCount)+1);state.expenses.push({id:uid(),title:`قسط ${p.title}`,amount,date:todayISO(),category:'اقساط'});const next=new Date(p.nextDueDate||todayISO());next.setMonth(next.getMonth()+1);p.nextDueDate=next.toISOString().slice(0,10);if(p.paidCount>=p.count)p.status='settled';},'پرداخت قسط ثبت شد.')); }
+function payInstallment(id){ const p=state.installments.find(x=>x.id===id); if(!p||p.status==='settled')return; promptAmount(`پرداخت قسط ${p.title}`,p.installmentAmount,amount=>mutate(()=>{p.payments=p.payments||[];p.payments.push({id:uid(),amount,date:todayISO()});p.paidCount=Math.min(p.count,Number(p.paidCount)+1);state.expenses.push({id:uid(),title:`قسط ${p.title}`,amount,date:todayISO(),category:'اقساط'});const next=dateFromISO(p.nextDueDate||todayISO());next.setMonth(next.getMonth()+1);p.nextDueDate=localISODate(next);if(p.paidCount>=p.count)p.status='settled';},'پرداخت قسط ثبت شد.')); }
 function deleteItem(ref){ if(!confirm('این مورد حذف شود؟'))return; const [type,id]=ref.split(':'); mutate(()=>{ if(type==='inventory')state.inventory=state.inventory.filter(x=>x.id!==id); if(type==='shopping')state.shopping=state.shopping.filter(x=>x.id!==id); if(type==='bill')state.bills=state.bills.filter(x=>x.id!==id); if(type==='expense')state.expenses=state.expenses.filter(x=>x.id!==id); if(type==='installment')state.installments=state.installments.filter(x=>x.id!==id); if(type==='hygiene')state.hygiene=state.hygiene.filter(x=>x.id!==id); if(type==='routine')state.routines=state.routines.filter(x=>x.id!==id);},'حذف شد.'); }
 
 function quickAction(type){ if(type==='inventory'){homeTab='shopping';navigate('home');setTimeout(()=>openAddModal('shopping'),50);} else if(type==='expense')openAddModal('expense'); else if(type==='installment'){navigate('installments');setTimeout(()=>openAddModal('installment'),50);} else if(type==='journal')openJournal(); }
@@ -302,11 +358,11 @@ function openAddModal(type){
   const forms={
     inventory:{title:'افزودن قلم موجودی',html:`${field('name','نام کالا')}${selectField('cycle','دوره بررسی',[['daily','روزانه'],['weekly','هفتگی'],['monthly','ماهانه'],['3','هر ۳ روز'],['14','هر ۱۴ روز']])}${selectField('status','وضعیت',[['ok','موجود'],['low','رو به اتمام'],['out','تمام‌شده']])}`},
     shopping:{title:'افزودن به لیست خرید',html:`${field('name','نام کالا')}${field('qty','مقدار یا تعداد')}${field('price','قیمت تقریبی','number')}`},
-    expense:{title:'ثبت هزینه',html:`${field('title','عنوان هزینه')}${field('amount','مبلغ','number')}${selectField('category','دسته‌بندی',[['مواد غذایی','مواد غذایی'],['قبوض','قبوض'],['ساختمان','ساختمان'],['اقساط','اقساط'],['سایر','سایر']])}${field('date','تاریخ','date',todayISO())}`},
-    bill:{title:'ثبت قبض',html:`${field('title','عنوان قبض')}${field('amount','مبلغ','number')}${field('dueDate','تاریخ سررسید','date')}${selectField('owner','مسئول پرداخت',[['خودم','خودم'],['مستأجر','مستأجر'],['مشترک','مشترک']])}${selectField('tenant','برای مستأجر ارسال می‌شود؟',[['','خیر'],['yes','بله']])}`},
+    expense:{title:'ثبت هزینه',html:`${field('title','عنوان هزینه')}${field('amount','مبلغ','number')}${selectField('category','دسته‌بندی',[['مواد غذایی','مواد غذایی'],['قبوض','قبوض'],['ساختمان','ساختمان'],['اقساط','اقساط'],['سایر','سایر']])}${jalaliDateField('date','تاریخ',todayISO())}`},
+    bill:{title:'ثبت قبض',html:`${field('title','عنوان قبض')}${field('amount','مبلغ','number')}${jalaliDateField('dueDate','تاریخ سررسید')}${selectField('owner','مسئول پرداخت',[['خودم','خودم'],['مستأجر','مستأجر'],['مشترک','مشترک']])}${selectField('tenant','برای مستأجر ارسال می‌شود؟',[['','خیر'],['yes','بله']])}`},
     charge:{title:'ثبت شارژ ساختمان',html:`${field('amount','مبلغ شارژ هر واحد','number')}${field('title','عنوان دوره','text','شارژ ماهانه')}`},
     cleaning:{title:'برنامه نظافت',html:`${field('title','عنوان کار')}${field('interval','تکرار هر چند روز','number','30')}${field('cost','هزینه تقریبی','number','0')}`},
-    installment:{title:'افزودن قسط',html:`${field('title','عنوان قسط')}${field('provider','بانک یا سرویس')}${selectField('type','نوع',[['bank','بانکی'],['bnpl','BNPL'],['purchase','خرید اقساطی'],['subscription','اشتراک']])}${field('installmentAmount','مبلغ هر قسط','number')}${field('count','تعداد کل اقساط','number')}${field('paidCount','تعداد پرداخت‌شده','number','0')}${field('nextDueDate','سررسید بعدی','date')}`},
+    installment:{title:'افزودن قسط',html:`${field('title','عنوان قسط')}${field('provider','بانک یا سرویس')}${selectField('type','نوع',[['bank','بانکی'],['bnpl','BNPL'],['purchase','خرید اقساطی'],['subscription','اشتراک']])}${field('installmentAmount','مبلغ هر قسط','number')}${field('count','تعداد کل اقساط','number')}${field('paidCount','تعداد پرداخت‌شده','number','0')}${jalaliDateField('nextDueDate','سررسید بعدی')}`},
     hygiene:{title:'افزودن فعالیت بهداشت‌یار',html:`${field('title','عنوان فعالیت')}${selectField('category','دسته',[['personal','بهداشت شخصی'],['home','نظافت منزل']])}${selectField('frequency','تکرار',[['daily','روزانه'],['interval','هر چند روز']])}${field('interval','فاصله روزها','number','1')}${field('time','ساعت یادآوری','time','20:00')}`},
     routine:{title:'افزودن روتین',html:`${field('title','عنوان روتین')}${selectField('kind','نوع',[['daily','روزانه'],['weeklyTarget','چند بار در هفته']])}${field('target','تعداد هدف هفتگی','number','1')}${field('duration','مدت هدف به دقیقه','number','30')}${field('time','ساعت یادآوری','time','20:00')}`}
   };
@@ -324,11 +380,88 @@ function openAddModal(type){
   });
 }
 function field(name,label,type='text',value=''){ return `<div class="field"><label>${label}</label><input name="${name}" type="${type}" value="${escapeHtml(value)}" ${['name','title','amount','installmentAmount'].includes(name)?'required':''}></div>`; }
+function jalaliDateField(name,label,value=''){
+  const view=isoToJalali(value||todayISO())||isoToJalali(todayISO());
+  return `<div class="field jalali-field" data-jalali-field data-view-jy="${view.jy}" data-view-jm="${view.jm}">
+    <label>${label} <span class="calendar-label">شمسی</span></label>
+    <div class="jalali-input-wrap">
+      <input type="text" class="jalali-display" data-jalali-display inputmode="numeric" placeholder="۱۴۰۵/۰۴/۲۷" value="${escapeHtml(formatJalaliISO(value))}" autocomplete="off">
+      <input type="hidden" name="${name}" value="${escapeHtml(value)}" data-jalali-value>
+      <button type="button" class="calendar-btn" data-jalali-toggle aria-label="بازکردن تقویم شمسی">تقویم</button>
+    </div>
+    <div class="jalali-calendar hidden" data-jalali-calendar></div>
+  </div>`;
+}
 function selectField(name,label,options){ return `<div class="field"><label>${label}</label><select name="${name}">${options.map(([v,l])=>`<option value="${v}">${l}</option>`).join('')}</select></div>`; }
+function syncJalaliField(field,showError=true){
+  const display=$('[data-jalali-display]',field);
+  const hidden=$('[data-jalali-value]',field);
+  const text=display.value.trim();
+  if(!text){ hidden.value=''; display.setCustomValidity(''); return true; }
+  const parsed=parseJalaliText(text);
+  if(!parsed){ hidden.value=''; display.setCustomValidity('تاریخ شمسی معتبر را به شکل ۱۴۰۵/۰۴/۲۷ وارد کن.'); if(showError)display.reportValidity(); return false; }
+  hidden.value=parsed.iso;
+  display.value=formatJalaliISO(parsed.iso);
+  display.setCustomValidity('');
+  field.dataset.viewJy=String(parsed.jy); field.dataset.viewJm=String(parsed.jm);
+  return true;
+}
+function syncAllJalaliFields(root){
+  let valid=true;
+  $$('[data-jalali-field]',root).forEach(field=>{ if(!syncJalaliField(field,false))valid=false; });
+  if(!valid) $('[data-jalali-display]:invalid',root)?.reportValidity();
+  return valid;
+}
+function renderJalaliCalendar(field){
+  const panel=$('[data-jalali-calendar]',field);
+  const jy=Number(field.dataset.viewJy); const jm=Number(field.dataset.viewJm);
+  const selectedISO=$('[data-jalali-value]',field).value;
+  const selected=selectedISO?isoToJalali(selectedISO):null;
+  const today=isoToJalali(todayISO());
+  const firstISO=jalaliToISO(jy,jm,1);
+  const firstDate=dateFromISO(firstISO);
+  const offset=(firstDate.getDay()+1)%7;
+  const count=jalaliMonthLength(jy,jm);
+  const cells=[];
+  for(let i=0;i<offset;i++)cells.push('<span class="jcal-empty"></span>');
+  for(let day=1;day<=count;day++){
+    const isSelected=selected&&selected.jy===jy&&selected.jm===jm&&selected.jd===day;
+    const isToday=today&&today.jy===jy&&today.jm===jm&&today.jd===day;
+    cells.push(`<button type="button" class="jcal-day ${isSelected?'selected':''} ${isToday?'today':''}" data-jcal-day="${day}">${toPersianDigits(day)}</button>`);
+  }
+  panel.innerHTML=`<div class="jcal-head"><button type="button" data-jcal-nav="-1" aria-label="ماه قبل">›</button><strong>${PERSIAN_MONTHS[jm-1]} ${toPersianDigits(jy)}</strong><button type="button" data-jcal-nav="1" aria-label="ماه بعد">‹</button></div><div class="jcal-weekdays">${PERSIAN_WEEKDAYS.map(d=>`<span>${d}</span>`).join('')}</div><div class="jcal-grid">${cells.join('')}</div><div class="jcal-footer"><button type="button" class="mini-btn" data-jcal-today>امروز</button><button type="button" class="mini-btn" data-jcal-clear>پاک‌کردن</button></div>`;
+  $$('[data-jcal-nav]',panel).forEach(btn=>btn.onclick=()=>{
+    let y=jy,m=jm+Number(btn.dataset.jcalNav);
+    if(m<1){m=12;y--;} if(m>12){m=1;y++;}
+    field.dataset.viewJy=String(y);field.dataset.viewJm=String(m);renderJalaliCalendar(field);
+  });
+  $$('[data-jcal-day]',panel).forEach(btn=>btn.onclick=()=>{
+    const iso=jalaliToISO(jy,jm,Number(btn.dataset.jcalDay));
+    $('[data-jalali-value]',field).value=iso;
+    $('[data-jalali-display]',field).value=formatJalaliISO(iso);
+    $('[data-jalali-display]',field).setCustomValidity('');
+    panel.classList.add('hidden');
+  });
+  $('[data-jcal-today]',panel).onclick=()=>{
+    const iso=todayISO(); const j=isoToJalali(iso);
+    $('[data-jalali-value]',field).value=iso;$('[data-jalali-display]',field).value=formatJalaliISO(iso);
+    field.dataset.viewJy=String(j.jy);field.dataset.viewJm=String(j.jm);panel.classList.add('hidden');
+  };
+  $('[data-jcal-clear]',panel).onclick=()=>{ $('[data-jalali-value]',field).value='';$('[data-jalali-display]',field).value='';panel.classList.add('hidden'); };
+}
+function initJalaliFields(root){
+  $$('[data-jalali-field]',root).forEach(field=>{
+    const panel=$('[data-jalali-calendar]',field);
+    $('[data-jalali-toggle]',field).onclick=()=>{ $$('.jalali-calendar',root).forEach(p=>{if(p!==panel)p.classList.add('hidden');}); panel.classList.toggle('hidden'); if(!panel.classList.contains('hidden'))renderJalaliCalendar(field); };
+    const display=$('[data-jalali-display]',field);
+    display.onblur=()=>syncJalaliField(field,false);
+    display.oninput=()=>display.setCustomValidity('');
+  });
+}
 function openModal(title,html,onSubmit){
-  const modal=$('#modal'); $('#modalTitle').textContent=title; $('#modalBody').innerHTML=`<div class="form-grid">${html}</div>`; modal.showModal();
-  const form=$('#modalForm'); const handler=e=>{ if(e.submitter?.value==='cancel')return; e.preventDefault(); const fd=new FormData(form); const values=Object.fromEntries(fd.entries()); if(!form.reportValidity())return; onSubmit(values); saveState(); modal.close(); render(); toast('ذخیره شد.'); form.removeEventListener('submit',handler); };
-  form.addEventListener('submit',handler,{once:true});
+  const modal=$('#modal'); $('#modalTitle').textContent=title; $('#modalBody').innerHTML=`<div class="form-grid">${html}</div>`; initJalaliFields($('#modalBody')); modal.showModal();
+  const form=$('#modalForm'); const handler=e=>{ if(e.submitter?.value==='cancel'){form.removeEventListener('submit',handler);return;} e.preventDefault(); if(!syncAllJalaliFields(form))return; const fd=new FormData(form); const values=Object.fromEntries(fd.entries()); if(!form.reportValidity())return; onSubmit(values); saveState(); modal.close(); render(); toast('ذخیره شد.'); form.removeEventListener('submit',handler); };
+  form.addEventListener('submit',handler);
 }
 function promptAmount(title,defaultValue,cb){ openModal(title,field('amount','مبلغ','number',defaultValue),v=>cb(Number(v.amount||0))); }
 function openJournal(){ const existing=state.journal.find(j=>j.date===todayISO()); openModal('ژورنال امروز',`<div class="field full"><label>متن امروز</label><textarea name="text" required>${escapeHtml(existing?.text||'')}</textarea></div>`,v=>{ if(existing){existing.text=v.text;existing.updatedAt=nowISO();}else state.journal.push({id:uid(),date:todayISO(),text:v.text,createdAt:nowISO()}); }); }
@@ -355,6 +488,10 @@ function exportBackup(){ const blob=new Blob([JSON.stringify(state,null,2)],{typ
 $('#importInput').addEventListener('change',async e=>{ const file=e.target.files[0];if(!file)return;try{state=JSON.parse(await file.text());saveState();render();toast('بکاپ بازیابی شد.');}catch{toast('فایل بکاپ معتبر نیست.');}e.target.value='';});
 function resetApp(){ if(confirm('همه اطلاعات پاک و برنامه به حالت اولیه برگردد؟')){state=initialState();saveState();render();toast('برنامه بازنشانی شد.');} }
 
-if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(console.error));
+let serviceWorkerRefreshing=false;
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.addEventListener('controllerchange',()=>{ if(serviceWorkerRefreshing)return; serviceWorkerRefreshing=true; window.location.reload(); });
+  window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(console.error));
+}
 setInterval(checkNotifications,30000);
 render();
