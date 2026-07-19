@@ -23,6 +23,7 @@ const nowISO = () => new Date().toISOString();
 const faDate = (d=new Date(), opts={}) => new Intl.DateTimeFormat('fa-IR-u-ca-persian',{weekday:'long',year:'numeric',month:'long',day:'numeric',...opts}).format(d);
 const faNum = n => new Intl.NumberFormat('fa-IR').format(Number(n||0));
 const money = n => `${faNum(n)} تومان`;
+const formatGregorianISO = iso => { const d=dateFromISO(iso); return d ? `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')}` : ''; };
 const daysBetween = (a,b) => Math.floor((dateFromISO(b)-dateFromISO(a))/(86400000));
 const startOfWeek = (date=new Date()) => { const d=new Date(date); const day=(d.getDay()+1)%7; d.setHours(0,0,0,0); d.setDate(d.getDate()-day); return d; };
 const escapeHtml = s => String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#039;','"':'&quot;'}[c]));
@@ -108,6 +109,7 @@ const initialState = () => ({
     charges:[]
   },
   installments:[],
+  customReminders:[],
   reminders:{enabled:false,lastSent:{}},
   meta:{createdAt:nowISO(),updatedAt:nowISO()}
 });
@@ -146,6 +148,30 @@ function currentInstallmentDue(p){
   const limit=new Date(); limit.setDate(limit.getDate()+7);
   return next<=limit;
 }
+function activeCustomReminders(){ return (state.customReminders||[]).filter(r=>r.active!==false && r.status!=='done'); }
+function dueCustomReminder(r){ return r.active!==false && r.status!=='done' && r.date && r.date<=todayISO(); }
+function reminderStatus(r){
+  if(r.status==='done') return ['انجام‌شده','green'];
+  if(r.date<todayISO()) return ['عقب‌افتاده','red'];
+  if(r.date===todayISO()) return ['امروز','amber'];
+  return ['پیش‌رو','blue'];
+}
+function repeatLabel(value){ return value==='daily'?'روزانه':value==='weekly'?'هفتگی':value==='monthly'?'ماهانه':value==='yearly'?'سالانه':'بدون تکرار'; }
+function calendarLabel(value){ return value==='gregorian'?'میلادی':'شمسی'; }
+function addDaysISO(iso,days){ const d=dateFromISO(iso); d.setDate(d.getDate()+Number(days||0)); return localISODate(d); }
+function addGregorianMonthsISO(iso,months){
+  const d=dateFromISO(iso); const day=d.getDate(); d.setDate(1); d.setMonth(d.getMonth()+months); const max=new Date(d.getFullYear(),d.getMonth()+1,0).getDate(); d.setDate(Math.min(day,max)); return localISODate(d);
+}
+function addJalaliMonthsISO(iso,months){
+  const j=isoToJalali(iso); if(!j)return iso; const index=(j.jm-1)+months; const jy=j.jy+Math.floor(index/12); const jm=((index%12)+12)%12+1; const normalizedYear=index<0&&index%12?jy-1:jy; const targetYear=index<0&&index%12?normalizedYear:jy; const jd=Math.min(j.jd,jalaliMonthLength(targetYear,jm)); return jalaliToISO(targetYear,jm,jd);
+}
+function nextReminderDate(r){
+  if(r.repeat==='daily')return addDaysISO(r.date,1);
+  if(r.repeat==='weekly')return addDaysISO(r.date,7);
+  if(r.repeat==='monthly')return r.calendarType==='gregorian'?addGregorianMonthsISO(r.date,1):addJalaliMonthsISO(r.date,1);
+  if(r.repeat==='yearly')return r.calendarType==='gregorian'?addGregorianMonthsISO(r.date,12):addJalaliMonthsISO(r.date,12);
+  return r.date;
+}
 function dashboardTasks(){
   const tasks=[];
   state.hygiene.filter(dueHygiene).forEach(t=>tasks.push({id:t.id,module:'hygiene',title:t.title,meta:`بهداشت‌یار • ${t.time||''}`,done:false}));
@@ -153,6 +179,7 @@ function dashboardTasks(){
   state.inventory.filter(dueInventory).forEach(i=>tasks.push({id:i.id,module:'inventory',title:`بررسی موجودی ${i.name}`,meta:`خانه‌یار • ${cycleLabel(i.cycle)}`,done:false}));
   dueBills().forEach(b=>tasks.push({id:b.id,module:'bill',title:`${b.title} • ${money(b.amount)}`,meta:`سررسید ${toFaShort(b.dueDate)}`,done:false}));
   state.installments.filter(currentInstallmentDue).forEach(p=>tasks.push({id:p.id,module:'installment',title:`قسط ${p.title}`,meta:`${money(p.installmentAmount)} • سررسید ${toFaShort(p.nextDueDate)}`,done:false}));
+  activeCustomReminders().filter(dueCustomReminder).forEach(r=>tasks.push({id:r.id,module:'customReminder',title:r.title,meta:`یادآور • ${formatJalaliISO(r.date)} • ساعت ${r.time||'—'}`,done:false}));
   return tasks;
 }
 function cycleLabel(c){ return c==='daily'?'روزانه':c==='weekly'?'هفتگی':c==='monthly'?'ماهانه':`هر ${c} روز`; }
@@ -169,7 +196,7 @@ function navigate(route){
 }
 
 function render(){
-  renderDashboard(); renderHome(); renderInstallments(); renderHygiene(); renderRoutine(); renderSettings();
+  renderDashboard(); renderHome(); renderInstallments(); renderCustomReminders(); renderHygiene(); renderRoutine(); renderSettings();
   bindDynamicEvents();
 }
 
@@ -193,6 +220,7 @@ function renderDashboard(){
     <div class="grid module-grid">
       ${moduleCard('خانه‌یار','موجودی، خرید، قبوض و ساختمان',state.inventory.filter(i=>i.status!=='ok').length,'قلم نیازمند توجه','home')}
       ${moduleCard('قسط‌یار','اقساط بانکی و BNPL',state.installments.filter(p=>p.status!=='settled').length,'تعهد فعال','installments')}
+      ${moduleCard('یادآور','یادآوری‌های شخصی با تاریخ شمسی و میلادی',activeCustomReminders().length,'یادآور فعال','custom-reminders')}
       ${moduleCard('بهداشت‌یار','بهداشت شخصی و نظافت منزل',state.hygiene.filter(dueHygiene).length,'کار امروز','hygiene')}
       ${moduleCard('روتین‌یار','ورزش، مطالعه و ژورنالینگ',state.routines.filter(dueRoutine).length,'روتین باز','routine')}
     </div>
@@ -210,6 +238,7 @@ function renderDashboard(){
             <button class="quick-card" data-quick="inventory"><b>کمبود جدید</b><span>افزودن به لیست خرید</span></button>
             <button class="quick-card" data-quick="expense"><b>ثبت هزینه</b><span>هزینه خانه یا خرید</span></button>
             <button class="quick-card" data-quick="installment"><b>قسط جدید</b><span>بانک یا BNPL</span></button>
+            <button class="quick-card" data-quick="reminder"><b>یادآور جدید</b><span>تاریخ شمسی یا میلادی</span></button>
             <button class="quick-card" data-quick="journal"><b>ژورنال امروز</b><span>یادداشت روزانه</span></button>
           </div>
         </div>
@@ -253,6 +282,19 @@ function renderInstallments(){
     <div class="card"><div class="card-head"><h2>برنامه‌های پرداخت</h2><button class="btn primary" data-add="installment">افزودن قسط</button></div><div class="item-list">${state.installments.length?state.installments.map(p=>`<div class="item installment-card"><div><div class="item-title">${escapeHtml(p.title)} • ${escapeHtml(p.provider||'')}</div><div class="amount">${money(p.installmentAmount)}</div><div class="badges"><span class="badge blue">${faNum(p.paidCount)} از ${faNum(p.count)} پرداخت</span><span class="badge ${p.status==='settled'?'green':'amber'}">${p.status==='settled'?'تسویه شده':'فعال'}</span></div><div class="item-sub">سررسید بعدی: ${toFaShort(p.nextDueDate)} • مانده ${money(Math.max(0,p.count-p.paidCount)*p.installmentAmount)}</div></div><div class="item-actions"><button class="btn primary" data-pay-installment="${p.id}">ثبت پرداخت</button><button class="btn ghost" data-delete="installment:${p.id}">حذف</button></div></div>`).join(''):'<div class="empty">هنوز قسطی ثبت نشده است.</div>'}</div></div>`;
 }
 
+function renderCustomReminders(){
+  const all=(state.customReminders||[]).slice().sort((a,b)=>`${a.status==='done'?1:0}${a.date||''}${a.time||''}`.localeCompare(`${b.status==='done'?1:0}${b.date||''}${b.time||''}`));
+  const active=activeCustomReminders();
+  const todayCount=active.filter(r=>r.date===todayISO()).length;
+  const overdue=active.filter(r=>r.date<todayISO()).length;
+  const upcoming=active.filter(r=>r.date>todayISO()).length;
+  $('#route-custom-reminders').innerHTML=`${pageHead('یادآور','ثبت یادآوری شخصی با انتخاب تاریخ شمسی یا میلادی')}
+    <div class="grid stats reminder-stats"><div class="stat"><small>امروز</small><strong>${faNum(todayCount)}</strong></div><div class="stat"><small>عقب‌افتاده</small><strong>${faNum(overdue)}</strong></div><div class="stat"><small>پیش‌رو</small><strong>${faNum(upcoming)}</strong></div><div class="stat"><small>کل یادآورها</small><strong>${faNum(all.length)}</strong></div></div>
+    <div class="card"><div class="card-head"><div><h2>یادآوری‌های من</h2><p class="item-sub">هر تاریخ در هر دو تقویم نمایش داده می‌شود.</p></div><button class="btn primary" data-add="reminder">افزودن یادآور</button></div>
+      <div class="item-list">${all.length?all.map(r=>{const [status,statusClass]=reminderStatus(r);return `<div class="item reminder-item ${r.status==='done'?'done':''}"><div class="item-main"><div class="item-title">${escapeHtml(r.title)}</div>${r.notes?`<div class="item-sub reminder-note">${escapeHtml(r.notes)}</div>`:''}<div class="dual-date-view"><span><b>شمسی:</b> ${formatJalaliISO(r.date)||'—'}</span><span><b>میلادی:</b> ${formatGregorianISO(r.date)||'—'}</span><span><b>ساعت:</b> ${escapeHtml(r.time||'—')}</span></div><div class="badges"><span class="badge ${statusClass}">${status}</span><span class="badge">${repeatLabel(r.repeat)}</span><span class="badge blue">مبنای تکرار: ${calendarLabel(r.calendarType)}</span></div></div><div class="item-actions">${r.status!=='done'?`<button class="mini-btn primary" data-reminder-done="${r.id}">انجام شد</button>`:''}<button class="mini-btn" data-edit-reminder="${r.id}">ویرایش</button><button class="mini-btn" data-delete="reminder:${r.id}">حذف</button></div></div>`;}).join(''):'<div class="empty">هنوز یادآوری ثبت نشده است.</div>'}</div>
+    </div>`;
+}
+
 function renderHygiene(){
   const personal=state.hygiene.filter(t=>t.category==='personal');
   const home=state.hygiene.filter(t=>t.category==='home');
@@ -281,7 +323,7 @@ function renderSettings(){
     <div class="grid layout-2"><div class="card"><h2 class="section-title">پروفایل</h2><div class="form-grid"><div class="field"><label>نام</label><input id="profileName" value="${escapeHtml(state.profile.name)}"></div><div class="field"><label>منطقه زمانی</label><select id="profileTimezone"><option value="Asia/Baku" ${state.profile.timezone==='Asia/Baku'?'selected':''}>باکو</option><option value="Asia/Tehran" ${state.profile.timezone==='Asia/Tehran'?'selected':''}>تهران</option></select></div></div><button class="btn primary" data-save-profile style="margin-top:14px">ذخیره تنظیمات</button></div>
     <div class="card"><h2 class="section-title">نصب روی گوشی</h2><p class="item-sub">برای نصب استاندارد، اپ باید از یک آدرس HTTPS باز شده باشد.</p><button class="btn primary" data-install-app>${isStandalone()?'اپ نصب شده است':'نصب روزمره‌یار'}</button><div class="divider"></div><div class="notice">اگر دکمه نصب فعال نشد، صفحه را مستقیماً در Chrome یا Safari باز کن؛ نه داخل مرورگر داخلی پیام‌رسان.</div></div>
     <div class="card"><h2 class="section-title">اعلان مرورگر</h2><p class="item-sub">در نسخه فعلی، اعلان‌ها وقتی وب‌اپ باز است یا مرورگر اجازه اجرای آن را می‌دهد بررسی می‌شوند.</p><button class="btn ${state.reminders.enabled?'secondary':'primary'}" data-enable-notifications>${state.reminders.enabled?'اعلان فعال است':'فعال‌کردن اعلان'}</button><div class="divider"></div><div class="notice">برای اعلان کاملاً پس‌زمینه، بعداً وب‌اپ را به Supabase یا سرویس Push متصل می‌کنیم.</div></div>
-    <div class="card"><h2 class="section-title">تقویم</h2><div class="item"><div><div class="item-title">تقویم شمسی فعال است</div><div class="item-sub">تمام تاریخ‌های نمایشی و انتخاب تاریخ در فرم‌ها به‌صورت شمسی است.</div></div><span class="badge green">شمسی</span></div><p class="item-sub" style="margin-top:12px">برای پایداری محاسبات، تاریخ‌ها در حافظه به‌صورت استاندارد ذخیره می‌شوند اما همیشه شمسی نمایش داده می‌شوند.</p></div>
+    <div class="card"><h2 class="section-title">تقویم</h2><div class="item"><div><div class="item-title">تقویم شمسی و میلادی فعال است</div><div class="item-sub">در ماژول یادآور می‌توانی مبنای تاریخ را انتخاب کنی و هر دو تاریخ را کنار هم ببینی.</div></div><div class="badges"><span class="badge green">شمسی</span><span class="badge blue">میلادی</span></div></div><p class="item-sub" style="margin-top:12px">تاریخ‌ها در حافظه به‌صورت استاندارد ذخیره می‌شوند تا تبدیل بین دو تقویم دقیق بماند.</p></div>
     <div class="card"><h2 class="section-title">پشتیبان‌گیری</h2><div class="toolbar"><button class="btn primary" data-export>دانلود بکاپ</button><button class="btn ghost" data-import>بازیابی بکاپ</button></div><p class="item-sub">همه اطلاعات در مرورگر همین دستگاه ذخیره می‌شوند. بکاپ JSON را در جای امن نگه دار.</p></div>
     <div class="card"><h2 class="section-title">پاک‌سازی</h2><button class="btn danger" data-reset>بازنشانی کامل برنامه</button></div></div>`;
 }
@@ -292,7 +334,7 @@ function bindDynamicEvents(){
   $$('[data-add]').forEach(b=>b.onclick=()=>openAddModal(b.dataset.add));
   $$('[data-quick]').forEach(b=>b.onclick=()=>quickAction(b.dataset.quick));
   $$('[data-complete]').forEach(b=>b.onclick=()=>completeTaskRef(b.dataset.complete));
-  $$('[data-snooze]').forEach(b=>b.onclick=()=>toast('این مورد در مراجعه بعدی دوباره نمایش داده می‌شود.'));
+  $$('[data-snooze]').forEach(b=>b.onclick=()=>snoozeTaskRef(b.dataset.snooze));
   $$('[data-inv-status]').forEach(b=>b.onclick=()=>setInventoryStatus(b.dataset.invStatus));
   $$('[data-buy]').forEach(b=>b.onclick=()=>buyItem(b.dataset.buy));
   $$('[data-bill-paid]').forEach(b=>b.onclick=()=>markBillPaid(b.dataset.billPaid));
@@ -302,6 +344,8 @@ function bindDynamicEvents(){
   $$('[data-pay-installment]').forEach(b=>b.onclick=()=>payInstallment(b.dataset.payInstallment));
   $$('[data-hygiene-done]').forEach(b=>b.onclick=()=>completeHygiene(b.dataset.hygieneDone));
   $$('[data-routine-done]').forEach(b=>b.onclick=()=>completeRoutine(b.dataset.routineDone));
+  $$('[data-reminder-done]').forEach(b=>b.onclick=()=>completeCustomReminder(b.dataset.reminderDone));
+  $$('[data-edit-reminder]').forEach(b=>b.onclick=()=>openReminderModal(state.customReminders.find(r=>r.id===b.dataset.editReminder)));
   $$('[data-delete]').forEach(b=>b.onclick=()=>deleteItem(b.dataset.delete));
   $('[data-edit-book]')?.addEventListener('click',editBook);
   $('[data-save-profile]')?.addEventListener('click',saveProfile);
@@ -339,9 +383,11 @@ async function installApp(){
   toast(isiOS ? 'در منوی Share گزینه Add to Home Screen را بزن.' : 'این صفحه باید از یک آدرس HTTPS در Chrome باز شود.');
 }
 
-function completeTaskRef(ref){ const [module,id]=ref.split(':'); if(module==='hygiene') completeHygiene(id); else if(module==='routine') completeRoutine(id); else if(module==='inventory'){mutate(()=>{const i=state.inventory.find(x=>x.id===id);i.lastChecked=todayISO();},'بررسی موجودی ثبت شد.');} else if(module==='bill') markBillPaid(id); else if(module==='installment') payInstallment(id); }
+function completeTaskRef(ref){ const [module,id]=ref.split(':'); if(module==='hygiene') completeHygiene(id); else if(module==='routine') completeRoutine(id); else if(module==='customReminder') completeCustomReminder(id); else if(module==='inventory'){mutate(()=>{const i=state.inventory.find(x=>x.id===id);i.lastChecked=todayISO();},'بررسی موجودی ثبت شد.');} else if(module==='bill') markBillPaid(id); else if(module==='installment') payInstallment(id); }
 function completeHygiene(id){ mutate(()=>{const t=state.hygiene.find(x=>x.id===id);t.lastDone=todayISO();},'انجام شد ✓'); }
 function completeRoutine(id){ mutate(()=>{const r=state.routines.find(x=>x.id===id);r.logs=r.logs||[];r.logs.push({id:uid(),date:todayISO(),doneAt:nowISO(),duration:r.duration});},'روتین انجام‌شده ثبت شد.'); }
+function completeCustomReminder(id){ mutate(()=>{const r=state.customReminders.find(x=>x.id===id); if(!r)return; r.history=r.history||[]; r.history.push({date:todayISO(),doneAt:nowISO()}); r.lastDone=todayISO(); if(r.repeat==='once'){r.status='done';r.completedAt=nowISO();}else{let next=nextReminderDate(r);while(next<=todayISO()){r.date=next;next=nextReminderDate(r);}r.date=next;r.status='active';}},'یادآور انجام شد.'); }
+function snoozeTaskRef(ref){ const [module,id]=ref.split(':'); if(module!=='customReminder'){toast('این مورد در مراجعه بعدی دوباره نمایش داده می‌شود.');return;} mutate(()=>{const r=state.customReminders.find(x=>x.id===id);if(!r)return;const [h,m]=String(r.time||'09:00').split(':').map(Number);const d=dateFromISO(r.date||todayISO());d.setHours(h||0,m||0,0,0);d.setHours(d.getHours()+1);r.date=localISODate(d);r.time=`${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;},'یادآور یک ساعت به تعویق افتاد.'); }
 function setInventoryStatus(ref){ const [id,status]=ref.split(':'); mutate(()=>{const i=state.inventory.find(x=>x.id===id);i.status=status;i.lastChecked=todayISO();if(status!=='ok'&&!state.shopping.some(s=>!s.done&&s.name===i.name))state.shopping.push({id:uid(),name:i.name,qty:'',price:i.price||0,done:false,createdAt:nowISO()});},status==='ok'?'موجودی تأیید شد.':'به لیست خرید اضافه شد.'); }
 function buyItem(id){
   const s=state.shopping.find(x=>x.id===id); if(!s||s.done)return;
@@ -351,10 +397,11 @@ function markBillPaid(id){ mutate(()=>{const b=state.bills.find(x=>x.id===id);b.
 function shareBill(id){ const b=state.bills.find(x=>x.id===id); const text=`سلام، ${b.title} به مبلغ ${money(b.amount)} صادر شده است. مهلت پرداخت ${toFaShort(b.dueDate)} است. لطفاً پس از پرداخت اطلاع دهید.`; navigator.clipboard?.writeText(text); toast('متن قبض کپی شد.'); }
 function unitPayment(id){ promptAmount('مبلغ پرداختی واحد',0,amount=>mutate(()=>{const u=state.building.units.find(x=>x.id===id);u.balance=Math.max(0,Number(u.balance)-amount);},'پرداخت واحد ثبت شد.')); }
 function payInstallment(id){ const p=state.installments.find(x=>x.id===id); if(!p||p.status==='settled')return; promptAmount(`پرداخت قسط ${p.title}`,p.installmentAmount,amount=>mutate(()=>{p.payments=p.payments||[];p.payments.push({id:uid(),amount,date:todayISO()});p.paidCount=Math.min(p.count,Number(p.paidCount)+1);state.expenses.push({id:uid(),title:`قسط ${p.title}`,amount,date:todayISO(),category:'اقساط'});const next=dateFromISO(p.nextDueDate||todayISO());next.setMonth(next.getMonth()+1);p.nextDueDate=localISODate(next);if(p.paidCount>=p.count)p.status='settled';},'پرداخت قسط ثبت شد.')); }
-function deleteItem(ref){ if(!confirm('این مورد حذف شود؟'))return; const [type,id]=ref.split(':'); mutate(()=>{ if(type==='inventory')state.inventory=state.inventory.filter(x=>x.id!==id); if(type==='shopping')state.shopping=state.shopping.filter(x=>x.id!==id); if(type==='bill')state.bills=state.bills.filter(x=>x.id!==id); if(type==='expense')state.expenses=state.expenses.filter(x=>x.id!==id); if(type==='installment')state.installments=state.installments.filter(x=>x.id!==id); if(type==='hygiene')state.hygiene=state.hygiene.filter(x=>x.id!==id); if(type==='routine')state.routines=state.routines.filter(x=>x.id!==id);},'حذف شد.'); }
+function deleteItem(ref){ if(!confirm('این مورد حذف شود؟'))return; const [type,id]=ref.split(':'); mutate(()=>{ if(type==='inventory')state.inventory=state.inventory.filter(x=>x.id!==id); if(type==='shopping')state.shopping=state.shopping.filter(x=>x.id!==id); if(type==='bill')state.bills=state.bills.filter(x=>x.id!==id); if(type==='expense')state.expenses=state.expenses.filter(x=>x.id!==id); if(type==='installment')state.installments=state.installments.filter(x=>x.id!==id); if(type==='hygiene')state.hygiene=state.hygiene.filter(x=>x.id!==id); if(type==='routine')state.routines=state.routines.filter(x=>x.id!==id); if(type==='reminder')state.customReminders=state.customReminders.filter(x=>x.id!==id);},'حذف شد.'); }
 
-function quickAction(type){ if(type==='inventory'){homeTab='shopping';navigate('home');setTimeout(()=>openAddModal('shopping'),50);} else if(type==='expense')openAddModal('expense'); else if(type==='installment'){navigate('installments');setTimeout(()=>openAddModal('installment'),50);} else if(type==='journal')openJournal(); }
+function quickAction(type){ if(type==='inventory'){homeTab='shopping';navigate('home');setTimeout(()=>openAddModal('shopping'),50);} else if(type==='expense')openAddModal('expense'); else if(type==='installment'){navigate('installments');setTimeout(()=>openAddModal('installment'),50);} else if(type==='journal')openJournal(); else if(type==='reminder'){navigate('custom-reminders');setTimeout(()=>openReminderModal(),50);} }
 function openAddModal(type){
+  if(type==='reminder'){openReminderModal();return;}
   const forms={
     inventory:{title:'افزودن قلم موجودی',html:`${field('name','نام کالا')}${selectField('cycle','دوره بررسی',[['daily','روزانه'],['weekly','هفتگی'],['monthly','ماهانه'],['3','هر ۳ روز'],['14','هر ۱۴ روز']])}${selectField('status','وضعیت',[['ok','موجود'],['low','رو به اتمام'],['out','تمام‌شده']])}`},
     shopping:{title:'افزودن به لیست خرید',html:`${field('name','نام کالا')}${field('qty','مقدار یا تعداد')}${field('price','قیمت تقریبی','number')}`},
@@ -392,7 +439,16 @@ function jalaliDateField(name,label,value=''){
     <div class="jalali-calendar hidden" data-jalali-calendar></div>
   </div>`;
 }
-function selectField(name,label,options){ return `<div class="field"><label>${label}</label><select name="${name}">${options.map(([v,l])=>`<option value="${v}">${l}</option>`).join('')}</select></div>`; }
+function selectField(name,label,options,selected=''){ return `<div class="field"><label>${label}</label><select name="${name}">${options.map(([v,l])=>`<option value="${v}" ${String(v)===String(selected)?'selected':''}>${l}</option>`).join('')}</select></div>`; }
+function textareaField(name,label,value=''){ return `<div class="field full"><label>${label}</label><textarea name="${name}">${escapeHtml(value)}</textarea></div>`; }
+function dualCalendarDateField(name,label,value=todayISO(),mode='jalali'){
+  const view=isoToJalali(value||todayISO())||isoToJalali(todayISO());
+  return `<div class="field full dual-date-field" data-dual-date-field data-mode="${mode}"><label>${label}</label><div class="calendar-mode-switch"><button type="button" data-calendar-mode="jalali" class="${mode==='jalali'?'active':''}">تقویم شمسی</button><button type="button" data-calendar-mode="gregorian" class="${mode==='gregorian'?'active':''}">تقویم میلادی</button></div><input type="hidden" name="${name}" value="${escapeHtml(value)}" data-dual-date-value><input type="hidden" name="calendarType" value="${mode}" data-calendar-mode-value><div data-calendar-panel="jalali" class="${mode==='jalali'?'':'hidden'}"><div class="jalali-field" data-jalali-field data-view-jy="${view.jy}" data-view-jm="${view.jm}"><div class="jalali-input-wrap"><input type="text" class="jalali-display" data-jalali-display inputmode="numeric" placeholder="۱۴۰۵/۰۴/۲۷" value="${escapeHtml(formatJalaliISO(value))}" autocomplete="off"><input type="hidden" value="${escapeHtml(value)}" data-jalali-value><button type="button" class="calendar-btn" data-jalali-toggle>تقویم</button></div><div class="jalali-calendar hidden" data-jalali-calendar></div></div></div><div data-calendar-panel="gregorian" class="${mode==='gregorian'?'':'hidden'}"><input type="date" class="gregorian-date-input" data-gregorian-display value="${escapeHtml(value)}"></div><div class="dual-date-preview" data-dual-date-preview></div></div>`;
+}
+function updateDualDatePreview(wrapper,iso){ const el=$('[data-dual-date-preview]',wrapper);el.innerHTML=iso?`<span>شمسی: <b>${formatJalaliISO(iso)}</b></span><span>میلادی: <b>${formatGregorianISO(iso)}</b></span>`:'تاریخی انتخاب نشده است.'; }
+function syncDualDateField(wrapper,showError=true){ const mode=wrapper.dataset.mode;let iso='';if(mode==='jalali'){const jf=$('[data-jalali-field]',wrapper);if(!syncJalaliField(jf,showError))return false;iso=$('[data-jalali-value]',jf).value;}else{iso=$('[data-gregorian-display]',wrapper).value;if(!iso&&showError){$('[data-gregorian-display]',wrapper).reportValidity();return false;}}if(!iso)return false;$('[data-dual-date-value]',wrapper).value=iso;$('[data-calendar-mode-value]',wrapper).value=mode;const g=$('[data-gregorian-display]',wrapper);g.value=iso;const jf=$('[data-jalali-field]',wrapper);const j=isoToJalali(iso);$('[data-jalali-value]',jf).value=iso;$('[data-jalali-display]',jf).value=formatJalaliISO(iso);jf.dataset.viewJy=String(j.jy);jf.dataset.viewJm=String(j.jm);updateDualDatePreview(wrapper,iso);return true; }
+function initDualDateFields(root){ $$('[data-dual-date-field]',root).forEach(wrapper=>{const choose=mode=>{syncDualDateField(wrapper,false);wrapper.dataset.mode=mode;$('[data-calendar-mode-value]',wrapper).value=mode;$$('[data-calendar-mode]',wrapper).forEach(b=>b.classList.toggle('active',b.dataset.calendarMode===mode));$$('[data-calendar-panel]',wrapper).forEach(p=>p.classList.toggle('hidden',p.dataset.calendarPanel!==mode));};$$('[data-calendar-mode]',wrapper).forEach(b=>b.onclick=()=>choose(b.dataset.calendarMode));$('[data-gregorian-display]',wrapper).onchange=()=>{const iso=$('[data-gregorian-display]',wrapper).value;if(iso){$('[data-dual-date-value]',wrapper).value=iso;updateDualDatePreview(wrapper,iso);}};updateDualDatePreview(wrapper,$('[data-dual-date-value]',wrapper).value);}); }
+function syncAllDualDateFields(root){let valid=true;$$('[data-dual-date-field]',root).forEach(w=>{if(!syncDualDateField(w,false))valid=false;});if(!valid)toast('تاریخ یادآوری را انتخاب کن.');return valid;}
 function syncJalaliField(field,showError=true){
   const display=$('[data-jalali-display]',field);
   const hidden=$('[data-jalali-value]',field);
@@ -459,9 +515,14 @@ function initJalaliFields(root){
   });
 }
 function openModal(title,html,onSubmit){
-  const modal=$('#modal'); $('#modalTitle').textContent=title; $('#modalBody').innerHTML=`<div class="form-grid">${html}</div>`; initJalaliFields($('#modalBody')); modal.showModal();
-  const form=$('#modalForm'); const handler=e=>{ if(e.submitter?.value==='cancel'){form.removeEventListener('submit',handler);return;} e.preventDefault(); if(!syncAllJalaliFields(form))return; const fd=new FormData(form); const values=Object.fromEntries(fd.entries()); if(!form.reportValidity())return; onSubmit(values); saveState(); modal.close(); render(); toast('ذخیره شد.'); form.removeEventListener('submit',handler); };
+  const modal=$('#modal'); $('#modalTitle').textContent=title; $('#modalBody').innerHTML=`<div class="form-grid">${html}</div>`; initJalaliFields($('#modalBody')); initDualDateFields($('#modalBody')); modal.showModal();
+  const form=$('#modalForm'); const handler=e=>{ if(e.submitter?.value==='cancel'){form.removeEventListener('submit',handler);return;} e.preventDefault(); if(!syncAllDualDateFields(form))return; if(!syncAllJalaliFields(form))return; const fd=new FormData(form); const values=Object.fromEntries(fd.entries()); if(!form.reportValidity())return; onSubmit(values); saveState(); modal.close(); render(); toast('ذخیره شد.'); form.removeEventListener('submit',handler); };
   form.addEventListener('submit',handler);
+}
+function openReminderModal(reminder=null){
+  const r=reminder||{title:'',notes:'',date:todayISO(),time:'09:00',repeat:'once',calendarType:'jalali'};
+  const html=`${field('title','عنوان یادآوری','text',r.title)}${field('time','ساعت یادآوری','time',r.time||'09:00')}${selectField('repeat','تکرار',[['once','بدون تکرار'],['daily','روزانه'],['weekly','هفتگی'],['monthly','ماهانه'],['yearly','سالانه']],r.repeat||'once')}${dualCalendarDateField('date','تاریخ یادآوری',r.date||todayISO(),r.calendarType||'jalali')}${textareaField('notes','توضیحات',r.notes||'')}`;
+  openModal(reminder?'ویرایش یادآور':'افزودن یادآور',html,values=>{if(reminder){Object.assign(reminder,{title:values.title.trim(),notes:values.notes.trim(),date:values.date,time:values.time,repeat:values.repeat,calendarType:values.calendarType,status:'active',active:true,updatedAt:nowISO()});}else{state.customReminders=state.customReminders||[];state.customReminders.push({id:uid(),title:values.title.trim(),notes:values.notes.trim(),date:values.date,time:values.time,repeat:values.repeat,calendarType:values.calendarType,status:'active',active:true,history:[],createdAt:nowISO()});}});
 }
 function promptAmount(title,defaultValue,cb){ openModal(title,field('amount','مبلغ','number',defaultValue),v=>cb(Number(v.amount||0))); }
 function openJournal(){ const existing=state.journal.find(j=>j.date===todayISO()); openModal('ژورنال امروز',`<div class="field full"><label>متن امروز</label><textarea name="text" required>${escapeHtml(existing?.text||'')}</textarea></div>`,v=>{ if(existing){existing.text=v.text;existing.updatedAt=nowISO();}else state.journal.push({id:uid(),date:todayISO(),text:v.text,createdAt:nowISO()}); }); }
@@ -478,8 +539,9 @@ function checkNotifications(){
   const now=new Date(); const hhmm=now.toTimeString().slice(0,5); const tasks=[];
   state.hygiene.filter(t=>dueHygiene(t)&&t.time===hhmm).forEach(t=>tasks.push(t.title));
   state.routines.filter(r=>dueRoutine(r)&&r.time===hhmm).forEach(r=>tasks.push(r.title));
+  activeCustomReminders().filter(r=>r.date===todayISO()&&r.time===hhmm).forEach(r=>tasks.push(r.title));
   if(!tasks.length)return;
-  const key=`${todayISO()}_${hhmm}`; if(state.reminders.lastSent[key])return;
+  const key=`${todayISO()}_${hhmm}_${tasks.join('|')}`; if(state.reminders.lastSent[key])return;
   const title='روزمره‌یار'; const body=tasks.join(' • ');
   if(navigator.serviceWorker?.controller)navigator.serviceWorker.ready.then(reg=>reg.showNotification(title,{body,icon:'icons/icon-192.png'})); else new Notification(title,{body});
   state.reminders.lastSent[key]=nowISO();saveState();
